@@ -1,5 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_sqlalchemy import SQLAlchemy
+from flask_mail import Message, Mail
+from itsdangerous import URLSafeTimedSerializer
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
@@ -18,6 +20,12 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 print(app.config['GOOGLE_CLIENT_ID'])
 print(app.config['GOOGLE_CLIENT_SECRET'])
+mail =Mail(app)
+# Serializer to generate and validate the reset token
+s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
+
+
 
 # User model
 class User(UserMixin, db.Model):
@@ -39,9 +47,53 @@ def load_user(id):
     return User.query.get(int(id))
 
 # Routes
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/password_reset', methods=['GET', 'POST'])
+def password_reset_request():
+    if request.method == 'POST':
+        user_input = request.form['email_or_username'].lower()
+
+        # Check if the input is an email or username
+        user = User.query.filter((User.email == user_input) | (User.username == user_input)).first()
+        if user:
+            token = s.dumps(user.email, salt='password-reset-salt')  # Generate reset token
+            reset_url = url_for('password_reset', token=token, _external=True)  # Password reset URL
+
+            # Send the email with the password reset link
+            msg = Message('Password Reset Request', recipients=[user.email])
+            msg.body = f"To reset your password, click the following link: {reset_url}"
+            mail.send(msg)
+
+            flash('Password reset link has been sent to your email.', 'info')
+            return redirect(url_for('login'))  # Redirect after sending the reset email
+        flash('No user found with that email address.', 'warning')
+    return render_template('password_reset_request.html')
+
+
+@app.route('/password_reset/<token>', methods=['GET', 'POST'])
+def password_reset(token):
+    try:
+        # Confirm the token is valid and has not expired
+        email = s.loads(token, salt='password-reset-salt', max_age=3600)  # max_age is 1 hour
+        user = User.query.filter_by(email=email).first()
+    except Exception as e:
+        flash('The password reset link is invalid or has expired.', 'danger')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        new_password = request.form['password']
+        print(new_password)
+        user.set_password(new_password)  # Hash and store the new password
+        db.session.commit()
+        flash('Your password has been updated successfully!', 'success')
+        return redirect(url_for('login'))
+
+    return render_template('password_reset.html')
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -49,7 +101,8 @@ def login():
         return redirect(url_for('index'))
     
     if request.method == 'POST':
-        user = User.query.filter_by(email=request.form['email']).first()
+        email = request.form['email'].lower()
+        user = User.query.filter_by(email=email).first()
         if user and user.check_password(request.form['password']):
             login_user(user)
             return redirect(url_for('index'))
@@ -157,13 +210,14 @@ def signup():
         return redirect(url_for('index'))
     
     if request.method == 'POST':
-        if User.query.filter_by(email=request.form['email']).first() or User.query.filter_by(username=request.form['username']).first():
+        email = request.form['email'].lower()
+        if User.query.filter_by(email=email).first() or User.query.filter_by(username=request.form['username']).first():
             flash('Email or username already registered')
             return redirect(url_for('signup'))
         
         user = User(
             username=request.form['username'],
-            email=request.form['email']
+            email=email
         )
         user.set_password(request.form['password'])
         db.session.add(user)
